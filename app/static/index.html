@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Docker Container Topology Visualizer</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <!-- Cytoscape.js via CDN (no bundler needed) -->
+  <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <div>
+        <h1>Docker Topology Visualizer</h1>
+        <p class="subtitle">Read-only view of networks, containers &amp; port bindings</p>
+      </div>
+    </div>
+    <div class="actions">
+      <span id="statusPill" class="pill idle">idle</span>
+      <span id="updatedAt" class="updated">never updated</span>
+      <button id="refreshBtn" type="button">Refresh Topology</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="canvas-wrap">
+      <div id="cy"></div>
+      <div id="emptyState" class="empty hidden">
+        No containers or networks reported by the daemon.
+      </div>
+      <div id="errorState" class="error hidden"></div>
+      <div class="legend">
+        <span><i class="sw running"></i>running</span>
+        <span><i class="sw exited"></i>exited</span>
+        <span><i class="sw paused"></i>paused</span>
+        <span><i class="sw net"></i>network (dashed)</span>
+      </div>
+    </section>
+
+    <aside class="inspector" aria-live="polite">
+      <h2>Inspector</h2>
+      <p id="inspectorHint" class="hint">Click any container node to see its details.</p>
+      <div id="inspectorCard" class="card hidden">
+        <h3 id="inspName">—</h3>
+        <dl>
+          <div><dt>ID</dt><dd id="inspId">—</dd></div>
+          <div><dt>Image</dt><dd id="inspImage">—</dd></div>
+          <div><dt>Status</dt><dd id="inspStatus">—</dd></div>
+          <div><dt>Host ports</dt><dd id="inspPorts">—</dd></div>
+        </dl>
+        <h4>Network attachments</h4>
+        <ul id="inspNets" class="nets"></ul>
+      </div>
+      <div class="api-hint">
+        <p>Data source: <code>GET /api/v1/topology</code></p>
+        <p><a href="/api/v1/topology" target="_blank" rel="noopener">Open raw JSON</a> · <a href="/docs" target="_blank" rel="noopener">API docs</a></p>
+      </div>
+    </aside>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
