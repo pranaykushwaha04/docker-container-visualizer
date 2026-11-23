@@ -1,13 +1,13 @@
-"""Pydantic models for the Docker topology graph.
+"""Pydantic models for the Docker topology graph, telemetry, and WebSocket events.
 
 Adapted from:
 - LeoVerto/docker-network-graph traversal concepts (network/subnet/container/IP)
 - DockerNet topology representation (networks with embedded containers),
   re-modeled here as flat validated Node/Edge lists.
 """
-from typing import List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class NetworkNode(BaseModel):
@@ -25,6 +25,7 @@ class ContainerNode(BaseModel):
     image: str = "untagged"
     status: str = "unknown"
     ports: List[str] = Field(default_factory=list)
+    is_protected: bool = False
 
 
 Node = Union[NetworkNode, ContainerNode]
@@ -58,3 +59,37 @@ class TopologyResponse(BaseModel):
                         f"Edge target '{edge.target}' does not match any node id"
                     )
         return self
+
+
+class ContainerStatsResponse(BaseModel):
+    container_id: str
+    status: str
+    cpu_percent: float = 0.0
+    memory_usage_mb: float = 0.0
+    memory_limit_mb: float = 0.0
+    memory_percent: float = 0.0
+
+
+DeltaEventType = Literal[
+    "NODE_ADDED",
+    "NODE_REMOVED",
+    "STATUS_UPDATED",
+    "NETWORK_UPDATED",
+]
+
+
+class TopologyDeltaEvent(BaseModel):
+    event: DeltaEventType
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ContainerActionResponse(BaseModel):
+    container_id: str
+    action: Literal["start", "stop", "restart", "delete"]
+    status: str
+
+
+class ContainerLogsResponse(BaseModel):
+    container_id: str
+    tail: int
+    logs: str
