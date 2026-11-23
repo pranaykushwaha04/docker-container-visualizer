@@ -13,6 +13,10 @@
 
   var cy = null;
   var lastTopology = null;
+  var selectedContainerId = null;
+  var ws = null;
+  var wsReconnectTimer = null;
+  var wsDisconnected = false;
 
   function statusColor(status) {
     return STATUS_COLORS[String(status || "").toLowerCase()] || "#64748b";
@@ -24,6 +28,13 @@
 
   function setPill(state, text) {
     var pill = el("statusPill");
+    pill.className = "pill " + state;
+    pill.textContent = text;
+  }
+
+  function setWsPill(state, text) {
+    var pill = el("wsPill");
+    if (!pill) return;
     pill.className = "pill " + state;
     pill.textContent = text;
   }
@@ -77,6 +88,7 @@
             image: n.image,
             status: n.status,
             ports: n.ports || [],
+            is_protected: Boolean(n.is_protected),
             color: statusColor(n.status),
           },
         });
@@ -143,6 +155,15 @@
         style: {
           "border-width": 4,
           "border-color": "#f8fafc",
+        },
+      },
+      {
+        selector: 'node.pending',
+        style: {
+          opacity: 0.6,
+          "border-style": "dashed",
+          "border-width": 3,
+          "border-color": "#38bdf8",
         },
       },
       {
@@ -259,7 +280,164 @@
     return out;
   }
 
+  function loadTelemetry(containerId, status) {
+    var cpuEl = el("inspCpu");
+    var memEl = el("inspMem");
+    if (!cpuEl || !memEl) return;
+
+    if (String(status || "").toLowerCase() !== "running") {
+      cpuEl.textContent = "0.0% (" + (status || "stopped") + ")";
+      memEl.textContent = "0 MB / 0 MB (0.0%)";
+      return;
+    }
+
+    cpuEl.textContent = "loading…";
+    memEl.textContent = "loading…";
+    fetch("/api/v1/containers/" + encodeURIComponent(containerId) + "/stats")
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (stats) {
+        if (selectedContainerId !== containerId) return;
+        cpuEl.textContent = Number(stats.cpu_percent || 0).toFixed(2) + "%";
+        memEl.textContent =
+          Number(stats.memory_usage_mb || 0).toFixed(1) +
+          " MB / " +
+          Number(stats.memory_limit_mb || 0).toFixed(1) +
+          " MB (" +
+          Number(stats.memory_percent || 0).toFixed(1) +
+          "%)";
+      })
+      .catch(function () {
+        if (selectedContainerId !== containerId) return;
+        cpuEl.textContent = "unavailable";
+        memEl.textContent = "unavailable";
+      });
+  }
+
+  var pendingContainers = {};
+
+  function getAdminToken() {
+    var input = el("adminTokenInput");
+    return input ? input.value.trim() : "";
+  }
+
+  function setActionStatus(msg, isError) {
+    var box = el("actionStatus");
+    if (!box) return;
+    if (!msg) {
+      box.classList.add("hidden");
+      box.textContent = "";
+      box.className = "action-status hidden";
+      return;
+    }
+    box.textContent = msg;
+    box.className = isError ? "action-status err" : "action-status";
+  }
+
+  function updateControlButtons(nodeData) {
+    var isProtected = Boolean(nodeData.is_protected);
+    var isPending = Boolean(pendingContainers[nodeData.id]);
+    var isRunning = String(nodeData.status || "").toLowerCase() === "running";
+
+    el("inspProtectedBadge").classList.toggle("hidden", !isProtected);
+    el("actStartBtn").disabled = isPending || isRunning;
+    el("actStopBtn").disabled = isPending || isProtected || !isRunning;
+    el("actRestartBtn").disabled = isPending || isProtected || !isRunning;
+    el("actDeleteBtn").disabled = isPending || isProtected;
+  }
+
+  function loadLogs(containerId) {
+    var box = el("inspLogs");
+    if (!box) return;
+    box.textContent = "Loading logs…";
+    fetch("/api/v1/containers/" + encodeURIComponent(containerId) + "/logs?tail=50")
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (data) {
+        if (selectedContainerId !== containerId) return;
+        box.textContent = data.logs || "(no log output)";
+      })
+      .catch(function (err) {
+        if (selectedContainerId !== containerId) return;
+        box.textContent = "Failed to load logs: " + err.message;
+      });
+  }
+
+  function switchTab(tab) {
+    var isLogs = tab === "logs";
+    el("tabOverview").classList.toggle("hidden", isLogs);
+    el("tabLogs").classList.toggle("hidden", !isLogs);
+    el("tabOverviewBtn").classList.toggle("active", !isLogs);
+    el("tabLogsBtn").classList.toggle("active", isLogs);
+    if (isLogs && selectedContainerId) {
+      loadLogs(selectedContainerId);
+    }
+  }
+
+  function runContainerAction(action) {
+    if (!selectedContainerId) return;
+    var containerId = selectedContainerId;
+    var node = cy ? cy.getElementById(containerId) : null;
+    var isRunning = node && String(node.data("status") || "").toLowerCase() === "running";
+
+    if (action === "delete") {
+      var msg = isRunning
+        ? "Container is running. Force remove this container?"
+        : "Remove this container permanently?";
+      if (!window.confirm(msg)) return;
+    }
+
+    var token = getAdminToken();
+    if (!token) {
+      setActionStatus("Enter Admin token in the navbar first.", true);
+      return;
+    }
+
+    pendingContainers[containerId] = true;
+    if (node && node.length) {
+      node.addClass("pending");
+      updateControlButtons(node.data());
+    }
+    setActionStatus("Sending " + action + "… waiting for Docker event.", false);
+
+    var method = action === "delete" ? "DELETE" : "POST";
+    var path =
+      action === "delete"
+        ? "/api/v1/containers/" + encodeURIComponent(containerId) + (isRunning ? "?force=true" : "")
+        : "/api/v1/containers/" + encodeURIComponent(containerId) + "/" + action;
+
+    fetch(path, {
+      method: method,
+      headers: { "X-Admin-Token": token },
+    })
+      .then(function (resp) {
+        if (!resp.ok) {
+          return resp.json().then(function (d) {
+            throw new Error((d && d.detail) || "HTTP " + resp.status);
+          });
+        }
+        return resp.json();
+      })
+      .then(function () {
+        // Do NOT fake color change here; wait for /ws/events to apply the real Docker state.
+        setActionStatus("Action accepted (" + action + "); awaiting live event…", false);
+      })
+      .catch(function (err) {
+        delete pendingContainers[containerId];
+        if (node && node.length) {
+          node.removeClass("pending");
+          if (selectedContainerId === containerId) updateControlButtons(node.data());
+        }
+        setActionStatus("Error: " + err.message, true);
+      });
+  }
+
   function showInspector(nodeData) {
+    selectedContainerId = nodeData.id;
     el("inspectorHint").classList.add("hidden");
     var card = el("inspectorCard");
     card.classList.remove("hidden");
@@ -269,6 +447,10 @@
     el("inspStatus").textContent = nodeData.status || "—";
     var ports = nodeData.ports || [];
     el("inspPorts").textContent = ports.length ? ports.join(", ") : "none published";
+    loadTelemetry(nodeData.id, nodeData.status);
+    updateControlButtons(nodeData);
+    if (!pendingContainers[nodeData.id]) setActionStatus("", false);
+    if (!el("tabLogs").classList.contains("hidden")) loadLogs(nodeData.id);
     var nets = attachmentsOf(nodeData.id);
     var ul = el("inspNets");
     ul.innerHTML = "";
@@ -286,6 +468,7 @@
   }
 
   function hideInspector() {
+    selectedContainerId = null;
     el("inspectorCard").classList.add("hidden");
     el("inspectorHint").classList.remove("hidden");
   }
@@ -347,8 +530,189 @@
       });
   }
 
+  function applyDelta(delta) {
+    if (!cy || !delta || !delta.event) return;
+    var p = delta.payload || {};
+
+    if (delta.event === "STATUS_UPDATED" && p.id) {
+      delete pendingContainers[p.id];
+      var node = cy.getElementById(p.id);
+      if (node && node.length) {
+        node.removeClass("pending");
+        node.data("status", p.status);
+        node.data("color", statusColor(p.status));
+        if (selectedContainerId === p.id) {
+          showInspector(node.data());
+        }
+      }
+    } else if (delta.event === "NODE_ADDED" && p.id) {
+      delete pendingContainers[p.id];
+      var existing = cy.getElementById(p.id);
+      if (existing && existing.length) {
+        existing.removeClass("pending");
+        existing.data("status", p.status || "running");
+        existing.data("color", statusColor(p.status || "running"));
+        if (p.name) existing.data({ name: p.name, label: p.name });
+        if (p.image) existing.data("image", p.image);
+        if (p.ports) existing.data("ports", p.ports);
+        if (typeof p.is_protected === "boolean") existing.data("is_protected", p.is_protected);
+        if (selectedContainerId === p.id) showInspector(existing.data());
+      } else {
+        var attachments = p.attachments || [];
+        var firstNet = attachments.length ? attachments[0].network_id : undefined;
+        if (firstNet && !cy.getElementById(firstNet).length) {
+          firstNet = undefined;
+        }
+        var pos;
+        if (firstNet) {
+          var parentBox = cy.getElementById(firstNet).boundingBox();
+          pos = { x: parentBox.x1 + 80, y: parentBox.y1 + 80 };
+        } else {
+          var orphanCount = cy
+            .nodes('node[type="container"]')
+            .filter(function (n) {
+              return n.isOrphan();
+            }).length;
+          pos = { x: 110 + orphanCount * 160, y: 94 };
+        }
+        cy.add({
+          group: "nodes",
+          data: {
+            id: p.id,
+            parent: firstNet,
+            type: "container",
+            label: p.name || p.id,
+            name: p.name || p.id,
+            image: p.image || "untagged",
+            status: p.status || "running",
+            ports: p.ports || [],
+            is_protected: Boolean(p.is_protected),
+            color: statusColor(p.status || "running"),
+          },
+          position: pos,
+        });
+        attachments.forEach(function (att, idx) {
+          if (!cy.getElementById(att.network_id).length) return;
+          cy.add({
+            group: "edges",
+            data: {
+              id: "e_ws_" + idx + "_" + p.id + "_" + att.network_id,
+              source: p.id,
+              target: att.network_id,
+              ip: att.ip_address || "",
+              label: att.ip_address || "",
+            },
+          });
+        });
+      }
+      el("emptyState").classList.add("hidden");
+    } else if (delta.event === "NODE_REMOVED" && p.id) {
+      delete pendingContainers[p.id];
+      var target = cy.getElementById(p.id);
+      if (target && target.length) {
+        cy.remove(target);
+      }
+      if (selectedContainerId === p.id) hideInspector();
+      el("emptyState").classList.toggle("hidden", cy.nodes().length > 0);
+    } else if (delta.event === "NETWORK_UPDATED" && p.container_id && p.network_id) {
+      var edgeSelector =
+        'edge[source="' + p.container_id + '"][target="' + p.network_id + '"]';
+      if (p.action === "connect") {
+        if (
+          cy.getElementById(p.container_id).length &&
+          cy.getElementById(p.network_id).length &&
+          !cy.edges(edgeSelector).length
+        ) {
+          cy.add({
+            group: "edges",
+            data: {
+              id: "e_ws_" + Date.now() + "_" + p.container_id + "_" + p.network_id,
+              source: p.container_id,
+              target: p.network_id,
+              ip: p.ip_address || "",
+              label: p.ip_address || "",
+            },
+          });
+        }
+      } else if (p.action === "disconnect") {
+        cy.remove(cy.edges(edgeSelector));
+        var cntNode = cy.getElementById(p.container_id);
+        if (cntNode && cntNode.length && cntNode.parent().id() === p.network_id) {
+          var remaining = cntNode.connectedEdges('edge[source="' + p.container_id + '"]');
+          var nextParent = remaining.length ? remaining[0].target().id() : null;
+          cntNode.move({ parent: nextParent });
+        }
+      }
+    }
+
+    el("updatedAt").textContent = "event " + new Date().toLocaleTimeString();
+  }
+
+  function connectWebSocket() {
+    if (wsReconnectTimer) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
+    var proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    var url = proto + "//" + window.location.host + "/ws/events";
+    setWsPill("loading", "ws: connecting");
+    try {
+      ws = new WebSocket(url);
+    } catch (_err) {
+      wsDisconnected = true;
+      setWsPill("error", "ws: offline");
+      wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+      return;
+    }
+
+    ws.onopen = function () {
+      setWsPill("ok", "ws: live");
+      if (wsDisconnected) {
+        wsDisconnected = false;
+        load();
+      }
+    };
+
+    ws.onmessage = function (evt) {
+      try {
+        var delta = JSON.parse(evt.data);
+        applyDelta(delta);
+      } catch (_err) {
+        // Ignore malformed frames
+      }
+    };
+
+    ws.onclose = function () {
+      wsDisconnected = true;
+      setWsPill("error", "ws: reconnecting");
+      wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+    };
+
+    ws.onerror = function () {
+      if (ws) ws.close();
+    };
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
+    var tokenInput = el("adminTokenInput");
+    if (tokenInput) {
+      tokenInput.value = sessionStorage.getItem("visualizer_admin_token") || "";
+      tokenInput.addEventListener("input", function () {
+        sessionStorage.setItem("visualizer_admin_token", tokenInput.value.trim());
+      });
+    }
+    el("tabOverviewBtn").addEventListener("click", function () { switchTab("overview"); });
+    el("tabLogsBtn").addEventListener("click", function () { switchTab("logs"); });
+    el("refreshLogsBtn").addEventListener("click", function () {
+      if (selectedContainerId) loadLogs(selectedContainerId);
+    });
+    el("actStartBtn").addEventListener("click", function () { runContainerAction("start"); });
+    el("actStopBtn").addEventListener("click", function () { runContainerAction("stop"); });
+    el("actRestartBtn").addEventListener("click", function () { runContainerAction("restart"); });
+    el("actDeleteBtn").addEventListener("click", function () { runContainerAction("delete"); });
+
     el("refreshBtn").addEventListener("click", load);
     load();
+    connectWebSocket();
   });
 })();

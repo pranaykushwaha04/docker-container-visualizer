@@ -18,6 +18,10 @@
       </div>
     </div>
     <div class="actions">
+      <label class="token-wrap" title="Admin token for Start/Stop/Restart/Delete">
+        <input id="adminTokenInput" type="password" placeholder="Admin token…" autocomplete="off" />
+      </label>
+      <span id="wsPill" class="pill idle">ws: connecting</span>
       <span id="statusPill" class="pill idle">idle</span>
       <span id="updatedAt" class="updated">never updated</span>
       <button id="refreshBtn" type="button">Refresh Topology</button>
@@ -43,15 +47,48 @@
       <h2>Inspector</h2>
       <p id="inspectorHint" class="hint">Click any container node to see its details.</p>
       <div id="inspectorCard" class="card hidden">
-        <h3 id="inspName">—</h3>
-        <dl>
-          <div><dt>ID</dt><dd id="inspId">—</dd></div>
-          <div><dt>Image</dt><dd id="inspImage">—</dd></div>
-          <div><dt>Status</dt><dd id="inspStatus">—</dd></div>
-          <div><dt>Host ports</dt><dd id="inspPorts">—</dd></div>
-        </dl>
-        <h4>Network attachments</h4>
-        <ul id="inspNets" class="nets"></ul>
+        <div class="card-head">
+          <h3 id="inspName">—</h3>
+          <span id="inspProtectedBadge" class="badge hidden">protected</span>
+        </div>
+
+        <div class="tabs" role="tablist">
+          <button id="tabOverviewBtn" class="tab active" type="button">Overview</button>
+          <button id="tabLogsBtn" class="tab" type="button">Logs</button>
+        </div>
+
+        <div id="tabOverview">
+          <dl>
+            <div><dt>ID</dt><dd id="inspId">—</dd></div>
+            <div><dt>Image</dt><dd id="inspImage">—</dd></div>
+            <div><dt>Status</dt><dd id="inspStatus">—</dd></div>
+            <div><dt>Host ports</dt><dd id="inspPorts">—</dd></div>
+          </dl>
+          <h4>Live Telemetry</h4>
+          <dl class="telemetry">
+            <div><dt>CPU</dt><dd id="inspCpu">—</dd></div>
+            <div><dt>Memory</dt><dd id="inspMem">—</dd></div>
+          </dl>
+          <h4>Network attachments</h4>
+          <ul id="inspNets" class="nets"></ul>
+
+          <h4>Controls</h4>
+          <div class="controls">
+            <button id="actStartBtn" class="btn btn-start" type="button">Start</button>
+            <button id="actStopBtn" class="btn btn-stop" type="button">Stop</button>
+            <button id="actRestartBtn" class="btn btn-restart" type="button">Restart</button>
+            <button id="actDeleteBtn" class="btn btn-delete" type="button">Delete</button>
+          </div>
+          <p id="actionStatus" class="action-status hidden"></p>
+        </div>
+
+        <div id="tabLogs" class="hidden">
+          <div class="logs-bar">
+            <span>Last 50 lines</span>
+            <button id="refreshLogsBtn" class="btn btn-small" type="button">Refresh Logs</button>
+          </div>
+          <pre id="inspLogs" class="logs-box">Select a container to view logs.</pre>
+        </div>
       </div>
       <div class="api-hint">
         <p>Data source: <code>GET /api/v1/topology</code></p>
