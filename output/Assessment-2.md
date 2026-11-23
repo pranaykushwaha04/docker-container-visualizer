@@ -5,16 +5,18 @@
 **Title:** Docker Container Topology Visualizer
 
 **Description:**
-A read-only DevOps observability service that inspects the local Docker Engine via
-`/var/run/docker.sock`, builds an in-memory graph of networks, containers, subnets,
-and port mappings, and exposes it over a validated REST API for rendering on an
-interactive UI canvas. It helps engineers debug container networking, subnet overlap,
-and host-port conflicts without ever mutating Docker state.
+A reactive, security-hardened, read-only DevOps observability service that inspects the
+Docker Engine via a least-privilege `docker-socket-proxy` (`DOCKER_HOST=tcp://socket-proxy:2375`),
+builds an in-memory graph of networks, containers, subnets, and port mappings, streams
+live container/network lifecycle deltas over WebSockets (`WS /ws/events`), and exposes
+on-demand CPU/RAM telemetry (`GET /api/v1/containers/{container_id}/stats`) on an
+interactive Cytoscape.js canvas.
 
 > Strictly read-only. The service never creates networks, starts/stops containers,
 > or deletes volumes. It only calls `networks.list()`, `containers.list(all=True)`,
-> and reads resource `.attrs`. All write paths from the reference repos are
-> intentionally discarded (see §9).
+> `containers.get(...).stats(stream=False)`, `events(decode=True)`, and reads `.attrs`.
+> Inside Docker Compose, `tecnativa/docker-socket-proxy` enforces `POST=0`, `DELETE=0`,
+> `EXEC=0`, `VOLUMES=0`, and `IMAGES=0` at the proxy boundary.
 
 **Reference reuse (adapted, read-paths only):**
 - `LeoVerto/docker-network-graph` — Docker SDK traversal logic: `client.networks.list()`
@@ -31,53 +33,57 @@ and host-port conflicts without ever mutating Docker state.
 
 | Component | Responsibility | Technology |
 |---|---|---|
-| **UI** | Interactive canvas rendering nodes (containers, networks) and edges (attachments, port forwards). Out of scope for Deliverable-1; consumes `GET /api/v1/topology`. | Any canvas lib (future: React + D3 / vis-network, per DockerNet layout logic) |
-| **Persistence** | In-memory graph snapshot cache. No database. Each API call builds a fresh snapshot from the daemon; an optional short-TTL in-process cache may be added later. No data is written to disk. | Python in-memory dict / `functools.lru_cache` (future) |
-| **Logic** | Docker SDK parser engine. Connects via `docker.from_env()`, extracts active networks, containers, IPAM subnets, and port mappings, returns validated graph schema. Pure read-only. | Python 3.11+, `docker-py`, Pydantic v2 |
+| **UI** | Interactive Cytoscape.js swimlane canvas rendering networks as compound boxes, containers color-coded by status (including standalone/orphan containers), live `/ws/events` delta patching with auto-reconnect re-sync, and an inspector sidebar with on-demand CPU/RAM telemetry. | Vanilla JS + Cytoscape.js (CDN), HTML/CSS |
+| **Persistence** | Stateless in-memory snapshots + active WebSocket connection set. No database or disk writes. | Python in-memory Pydantic models + `ConnectionManager` |
+| **Logic & Proxy** | Read-only Docker SDK parser (`extractor.py`), lifecycle event stream (`events.py`), and `tecnativa/docker-socket-proxy` isolating `/var/run/docker.sock:ro` on an internal `proxy-net`. | Python 3.11+, `docker-py`, Pydantic v2, `docker-socket-proxy` |
 
 ## 3. Architecture Diagram (ASCII)
 
 ```text
-                    +------------------+
-                    |  Docker Daemon   |
-                    | /var/run/docker  |
-                    |     .sock        |
-                    +--------+---------+
-                             |  SDK read-only:
-                             |  networks.list()
-                             |  containers.list(all=True)
-                             v
-                    +--------+---------+
-                    | Logic Service    |
-                    | Layer            |
-                    | (extractor.py +  |
-                    |  schemas.py)     |
-                    +--------+---------+
-                             |  validated TopologyResponse
-                             v
-                    +--------+---------+
-                    | REST API         |
-                    | (FastAPI)        |
-                    | GET /health      |
-                    | GET /api/v1/     |
-                    |   topology       |
-                    +--------+---------+
-                             |  JSON over HTTP
-                             |  (WebSocket in future)
-                             v
-                    +--------+---------+
-                    | UI Canvas        |
-                    | (interactive     |
-                    |  topology graph) |
-                    +------------------+
+                    +------------------------+
+                    |     Docker Daemon      |
+                    |  /var/run/docker.sock  |
+                    +-----------+------------+
+                                | :ro mount
+                                v
+                    +-----------+------------+
+                    |   docker-socket-proxy  |
+                    | CONTAINERS=1 NETWORKS=1|
+                    | EVENTS=1 INFO=1 PING=1 |
+                    | POST=0 DELETE=0 EXEC=0 |
+                    +-----------+------------+
+                                | tcp://socket-proxy:2375 (proxy-net, internal)
+                                v
+                    +-----------+------------+
+                    |  Visualizer (appuser)  |
+                    |  extractor.py +        |
+                    |  events.py + schemas.py|
+                    +-----------+------------+
+                                |
+           +--------------------+--------------------+
+           | REST (JSON)                             | WebSocket
+           v                                         v
+  GET /health                              WS /ws/events
+  GET /api/v1/topology                     (NODE_ADDED / NODE_REMOVED /
+  GET /api/v1/containers/{id}/stats         STATUS_UPDATED / NETWORK_UPDATED)
+           |                                         |
+           +--------------------+--------------------+
+                                v
+                    +-----------+------------+
+                    |  Cytoscape.js Canvas   |
+                    |  (swimlanes + live     |
+                    |   telemetry inspector) |
+                    +------------------------+
 ```
 
-Request flow:
-1. UI (or `curl`) calls `GET /api/v1/topology`.
-2. Logic layer opens a short-lived SDK client (`docker.from_env()`), lists networks
-   and containers, parses IPAM + `NetworkSettings`.
-3. Pydantic validates every node/edge before serialization.
-4. FastAPI returns `TopologyResponse` JSON. No state is mutated at any step.
+Request & event flow:
+1. On load, the UI calls `GET /api/v1/topology` and opens `WS /ws/events`.
+2. Background `DockerEventListener` streams `client.events(decode=True)` and broadcasts
+   `TopologyDeltaEvent` payloads to all connected browsers, patching Cytoscape in-place.
+3. On WebSocket reconnect after a drop, the UI automatically re-fetches
+   `GET /api/v1/topology` to close any missed-event gap.
+4. Clicking a running container fetches `GET /api/v1/containers/{id}/stats` for live
+   CPU % and memory usage.
 
 ## 4. Deliverable-1 Scope
 
