@@ -1,0 +1,44 @@
+services:
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # Read-only topology/event flags + container lifecycle (POST/DELETE)
+      CONTAINERS: "1"
+      NETWORKS: "1"
+      EVENTS: "1"
+      INFO: "1"
+      PING: "1"
+      POST: "1"
+      DELETE: "1"
+      # Explicitly deny exec, volume, image, and system-wide mutations
+      EXEC: "0"
+      VOLUMES: "0"
+      IMAGES: "0"
+      SYSTEM: "0"
+    networks:
+      - proxy-net
+
+  visualizer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DOCKER_HOST: tcp://socket-proxy:2375
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-token}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - socket-proxy
+    networks:
+      - proxy-net
+      - frontend-net
+
+networks:
+  proxy-net:
+    internal: true
+  frontend-net:
+    driver: bridge
